@@ -53,6 +53,7 @@ def generate_launch_description():
     sensor_init_dir  = get_package_share_directory('sensor_initialize')
     velodyne_driver_dir  = get_package_share_directory('velodyne_driver')
     velodyne_pointcloud_dir  = get_package_share_directory('velodyne_pointcloud')
+    fusion_pkg_dir   = get_package_share_directory('sensor_fusion_pkg')  # Fusion 패키지 경로
     # lidar_pre_dir    = get_package_share_directory('lidar_preprocessing_pkg')  # 전처리 패키지
     # fusion_pkg_dir   = get_package_share_directory('sensor_fusion_pkg')
 
@@ -110,19 +111,11 @@ def generate_launch_description():
             }]
         ),
 
-         # 6) 센서 융합 노드
-         Node(
-             package='sensor_fusion_pkg',
-             executable='bbox_projector_node',
-             name='bbox_projector',
-             output='screen',
-             parameters=[{
-                 'camera_frame':   'camera_front_up',
-                 'camera_frame':   'camera_front_up_frame',
-                 'detection_topic': '/detections/front_up',
-                 'lidar_topic':    '/lidar_preprocessed',
-                 'lidar_frame':    'velodyne'
-             }]
-         ),
+        # 6) LiDAR-카메라 Fusion (멀티 실행)
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(fusion_pkg_dir, 'launch', 'fusion_multi.launch.py')
+            )
+        ),
     ])
 

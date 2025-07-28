@@ -5,8 +5,6 @@
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/filters/voxel_grid.h>
-#include <pcl/segmentation/sac_segmentation.h>
-#include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
 
 class LidarPreprocessor : public rclcpp::Node
@@ -15,92 +13,84 @@ public:
     LidarPreprocessor()
     : Node("lidar_preprocessing_node")
     {
-        subscription_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-            input_topic_, 10,
-            std::bind(&LidarPreprocessor::cloudCallback, this, std::placeholders::_1));
+        // Left LiDAR
+        sub_left_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/velodyne_points", 10, std::bind(&LidarPreprocessor::callbackLeft, this, std::placeholders::_1));
+        pub_left_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/lidar_pre_left", 10);
 
-        publisher_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(output_topic_, 10);
+        // Right LiDAR
+        sub_right_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/velodyne_points", 10, std::bind(&LidarPreprocessor::callbackRight, this, std::placeholders::_1));
+        pub_right_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/lidar_pre_right", 10);
+
+        // Down LiDAR
+        sub_down_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+            "/velodyne_points", 10, std::bind(&LidarPreprocessor::callbackDown, this, std::placeholders::_1));
+        pub_down_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/lidar_pre_down", 10);
     }
 
 private:
-    // ======= 조정 가능한 파라미터들 =======
-    const std::string input_topic_ = "/velodyne_points";
-    const std::string output_topic_ = "/lidar_preprocessed";
-
-    // Voxel Grid 필터 설정 (단위: m)
+    // 공통 Voxel Grid 크기
     const float voxel_leaf_size_ = 0.05f;
 
-    // RANSAC 설정
-    const double ground_dist_thresh_ = 0.1;
+    // LiDAR별 ROI 설정
+    struct ROI {
+        float min_x, max_x;
+        float min_y, max_y;
+        float min_z, max_z;
+    };
 
-    // ROI 설정 (단위: m)
-    const float roi_min_x_ = -0.5f, roi_max_x_ = 5.5f;
-    const float roi_min_y_ = -2.5f, roi_max_y_ = 2.5f;
-    const float roi_min_z_ = -0.5f, roi_max_z_ = 1.0f;
+    ROI roi_left_{-1.0f, 5.0f, -3.0f, 2.0f, -1.0f, 1.5f};
+    ROI roi_right_{-0.5f, 6.0f, -2.0f, 3.0f, -0.5f, 1.2f};
+    ROI roi_down_{0.0f, 4.0f, -2.5f, 2.5f, -1.0f, 0.8f};
 
-    // =====================================
+    void callbackLeft(const sensor_msgs::msg::PointCloud2::SharedPtr msg)  { process(msg, roi_left_, pub_left_); }
+    void callbackRight(const sensor_msgs::msg::PointCloud2::SharedPtr msg) { process(msg, roi_right_, pub_right_); }
+    void callbackDown(const sensor_msgs::msg::PointCloud2::SharedPtr msg)  { process(msg, roi_down_, pub_down_); }
 
-    void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr input)
+    void process(const sensor_msgs::msg::PointCloud2::SharedPtr input,
+                 const ROI& roi,
+                 rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub)
     {
-        // [1] ROS → PCL 변환
+        // ROS → PCL 변환
         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_in(new pcl::PointCloud<pcl::PointXYZI>());
         pcl::fromROSMsg(*input, *cloud_in);
 
-        // [2] Voxel Grid 필터링 (다운샘플링)
+        // Voxel Grid 필터링
         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_voxel(new pcl::PointCloud<pcl::PointXYZI>());
         pcl::VoxelGrid<pcl::PointXYZI> voxel;
         voxel.setInputCloud(cloud_in);
         voxel.setLeafSize(voxel_leaf_size_, voxel_leaf_size_, voxel_leaf_size_);
         voxel.filter(*cloud_voxel);
 
-        // // [3] RANSAC 기반 Ground 제거
-        // pcl::SACSegmentation<pcl::PointXYZI> seg;
-        // seg.setOptimizeCoefficients(true);
-        // seg.setModelType(pcl::SACMODEL_PLANE);
-        // seg.setMethodType(pcl::SAC_RANSAC);
-        // seg.setDistanceThreshold(ground_dist_thresh_);
-        // seg.setInputCloud(cloud_voxel);
-
-        // pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
-        // pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-        // seg.segment(*inliers, *coefficients);
-
-        // pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_no_ground(new pcl::PointCloud<pcl::PointXYZI>());
-        // pcl::ExtractIndices<pcl::PointXYZI> extract;
-        // extract.setInputCloud(cloud_voxel);
-        // extract.setIndices(inliers);
-        // extract.setNegative(true);  // inlier 제거 (즉, ground 제거)
-        // extract.filter(*cloud_no_ground);
-
-        // [4] ROI 필터링
+        // ROI 필터링
         pcl::PassThrough<pcl::PointXYZI> pass;
         pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_roi(new pcl::PointCloud<pcl::PointXYZI>());
-
         pass.setInputCloud(cloud_voxel);
+
         pass.setFilterFieldName("x");
-        pass.setFilterLimits(roi_min_x_, roi_max_x_);
+        pass.setFilterLimits(roi.min_x, roi.max_x);
         pass.filter(*cloud_roi);
 
         pass.setInputCloud(cloud_roi);
         pass.setFilterFieldName("y");
-        pass.setFilterLimits(roi_min_y_, roi_max_y_);
+        pass.setFilterLimits(roi.min_y, roi.max_y);
         pass.filter(*cloud_roi);
 
         pass.setInputCloud(cloud_roi);
         pass.setFilterFieldName("z");
-        pass.setFilterLimits(roi_min_z_, roi_max_z_);
+        pass.setFilterLimits(roi.min_z, roi.max_z);
         pass.filter(*cloud_roi);
 
-        // [5] PCL → ROS 메시지 변환 및 Publish
+        // PCL → ROS 변환 후 Publish
         sensor_msgs::msg::PointCloud2 output;
         pcl::toROSMsg(*cloud_roi, output);
         output.header = input->header;
-        publisher_->publish(output);
+        pub->publish(output);
     }
 
-    // ROS 2 통신 객체
-    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr subscription_;
-    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr publisher_;
+    rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr sub_left_, sub_right_, sub_down_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pub_left_, pub_right_, pub_down_;
 };
 
 int main(int argc, char **argv)
